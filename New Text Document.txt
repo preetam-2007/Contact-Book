@@ -1,0 +1,273 @@
+"""
+Contact Book Application
+Tech Stack: Python 3, SQLite
+Architecture: Data Access Layer (ContactBook) + Presentation Layer (CLI Interface)
+"""
+
+import re
+import sqlite3
+from typing import List, Optional, Tuple
+
+
+class ContactBook:
+    """Handles database storage and operations for contacts."""
+
+    def __init__(self, db_name: str = "contacts.db"):
+        self.db_name = db_name
+        self._init_db()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.db_name)
+
+    def _init_db(self) -> None:
+        """Create the contacts table if it doesn't exist."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS contacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL COLLATE NOCASE,
+                    phone TEXT NOT NULL UNIQUE,
+                    email TEXT UNIQUE,
+                    address TEXT
+                )
+                """
+            )
+            # Create an index on name for fast prefix/exact searching
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name)"
+            )
+            conn.commit()
+
+    def add_contact(
+        self, name: str, phone: str, email: Optional[str], address: Optional[str]
+    ) -> bool:
+        """Insert a new contact into the database."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO contacts (name, phone, email, address)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (name.strip(), phone.strip(), email.strip() if email else None, address.strip() if address else None),
+                )
+                conn.commit()
+                return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def view_all(self) -> List[Tuple]:
+        """Retrieve all contacts sorted alphabetically by name."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name, phone, email, address FROM contacts ORDER BY name ASC")
+            return cursor.fetchall()
+
+    def search_contact(self, query: str) -> List[Tuple]:
+        """Search contacts by name or phone substring."""
+        pattern = f"%{query.strip()}%"
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, name, phone, email, address FROM contacts
+                WHERE name LIKE ? OR phone LIKE ?
+                ORDER BY name ASC
+                """,
+                (pattern, pattern),
+            )
+            return cursor.fetchall()
+
+    def update_contact(
+        self, contact_id: int, name: str, phone: str, email: Optional[str], address: Optional[str]
+    ) -> bool:
+        """Update existing contact details by ID."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE contacts
+                    SET name = ?, phone = ?, email = ?, address = ?
+                    WHERE id = ?
+                    """,
+                    (name.strip(), phone.strip(), email.strip() if email else None, address.strip() if address else None, contact_id),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+
+    def delete_contact(self, contact_id: int) -> bool:
+        """Delete a contact by ID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+
+# ---------------- CLI Helper & Validation Functions ----------------
+
+def validate_phone(phone: str) -> bool:
+    """Allow standard 10-15 digit phone numbers with optional country code."""
+    pattern = r"^\+?[0-9]{10,15}$"
+    return bool(re.match(pattern, phone.strip()))
+
+def validate_email(email: str) -> bool:
+    """Basic RFC-compliant email pattern check."""
+    if not email.strip():
+        return True  # Email is optional
+    pattern = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+    return bool(re.match(pattern, email.strip()))
+
+def print_table(records: List[Tuple]) -> None:
+    """Render a clean ASCII table for output."""
+    if not records:
+        print("\n[!] No contacts found.")
+        return
+
+    col_widths = [6, 22, 16, 26, 20]
+    headers = ["ID", "Name", "Phone", "Email", "Address"]
+
+    header_line = " | ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths))
+    divider = "-+-".join("-" * w for w in col_widths)
+
+    print("\n" + header_line)
+    print(divider)
+
+    for row in records:
+        row_display = [
+            str(row[0]),
+            row[1][:20] if row[1] else "",
+            row[2][:14] if row[2] else "",
+            (row[3] or "")[:24],
+            (row[4] or "")[:18],
+        ]
+        print(" | ".join(f"{col:<{w}}" for col, w in zip(row_display, col_widths)))
+    print()
+
+
+# ---------------- Presentation Layer ----------------
+
+def main():
+    book = ContactBook()
+
+    menu = """
+================ CONTACT BOOK ================
+1. Add New Contact
+2. View All Contacts
+3. Search Contact (by Name or Phone)
+4. Update Contact
+5. Delete Contact
+6. Exit
+==============================================
+Choose an option (1-6): """
+
+    while True:
+        choice = input(menu).strip()
+
+        if choice == "1":
+            print("\n--- Add Contact ---")
+            name = input("Enter Name: ").strip()
+            if not name:
+                print("[!] Name cannot be empty.")
+                continue
+
+            phone = input("Enter Phone: ").strip()
+            if not validate_phone(phone):
+                print("[!] Invalid phone format. Must be 10-15 digits (e.g. +919876543210 or 9876543210).")
+                continue
+
+            email = input("Enter Email (Optional, press Enter to skip): ").strip()
+            if email and not validate_email(email):
+                print("[!] Invalid email format.")
+                continue
+
+            address = input("Enter Address (Optional, press Enter to skip): ").strip()
+
+            success = book.add_contact(name, phone, email or None, address or None)
+            if success:
+                print(f"[✓] Contact '{name}' added successfully.")
+            else:
+                print("[!] Failed to add contact. Phone number or email already exists.")
+
+        elif choice == "2":
+            records = book.view_all()
+            print_table(records)
+
+        elif choice == "3":
+            query = input("\nEnter search keyword (Name or Phone): ").strip()
+            if query:
+                results = book.search_contact(query)
+                print_table(results)
+            else:
+                print("[!] Please enter a valid keyword.")
+
+        elif choice == "4":
+            print("\n--- Update Contact ---")
+            try:
+                cid = int(input("Enter Contact ID to update: "))
+            except ValueError:
+                print("[!] ID must be an integer.")
+                continue
+
+            # Check if contact exists first
+            records = book.search_contact("")
+            existing = next((r for r in records if r[0] == cid), None)
+            if not existing:
+                print(f"[!] No contact found with ID {cid}.")
+                continue
+
+            print(f"Current details: Name: {existing[1]}, Phone: {existing[2]}, Email: {existing[3]}, Address: {existing[4]}")
+            new_name = input(f"New Name [{existing[1]}]: ").strip() or existing[1]
+            
+            new_phone = input(f"New Phone [{existing[2]}]: ").strip() or existing[2]
+            if not validate_phone(new_phone):
+                print("[!] Invalid phone format. Update aborted.")
+                continue
+
+            new_email = input(f"New Email [{existing[3] or ''}]: ").strip()
+            new_email = new_email if new_email else existing[3]
+            if new_email and not validate_email(new_email):
+                print("[!] Invalid email format. Update aborted.")
+                continue
+
+            new_addr = input(f"New Address [{existing[4] or ''}]: ").strip()
+            new_addr = new_addr if new_addr else existing[4]
+
+            if book.update_contact(cid, new_name, new_phone, new_email, new_addr):
+                print(f"[✓] Contact ID {cid} updated successfully.")
+            else:
+                print("[!] Update failed. Phone or Email might conflict with another record.")
+
+        elif choice == "5":
+            print("\n--- Delete Contact ---")
+            try:
+                cid = int(input("Enter Contact ID to delete: "))
+            except ValueError:
+                print("[!] ID must be an integer.")
+                continue
+
+            confirm = input(f"Are you sure you want to delete Contact ID {cid}? (y/n): ").strip().lower()
+            if confirm == "y":
+                if book.delete_contact(cid):
+                    print(f"[✓] Contact ID {cid} deleted successfully.")
+                else:
+                    print(f"[!] No contact found with ID {cid}.")
+            else:
+                print("Deletion cancelled.")
+
+        elif choice == "6":
+            print("\nExiting Contact Book. Goodbye!")
+            break
+
+        else:
+            print("[!] Invalid option. Please enter a digit from 1 to 6.")
+
+
+if __name__ == "__main__":
+    main()
